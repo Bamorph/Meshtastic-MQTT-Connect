@@ -120,7 +120,7 @@ def generate_hash(name, key):
     result = h_name ^ h_key
     return result
 
-def get_name_by_id(type, user_id):
+def get_short_name_by_id(user_id):
     try:
         table_name = sanitize_string(mqtt_broker) + "_" + sanitize_string(root_topic) + sanitize_string(channel) + "_nodeinfo"
         with sqlite3.connect(db_file_path) as db_connection:
@@ -129,11 +129,8 @@ def get_name_by_id(type, user_id):
             # Convert the user_id to hex and prepend '!'
             hex_user_id = '!' + hex(user_id)[2:]
 
-            # Fetch the name based on the hex user ID
-            if type == "long":
-                result = db_cursor.execute(f'SELECT long_name FROM {table_name} WHERE user_id=?', (hex_user_id,)).fetchone()
-            if type == "short":
-                result = db_cursor.execute(f'SELECT short_name FROM {table_name} WHERE user_id=?', (hex_user_id,)).fetchone()
+            # Fetch the short name based on the hex user ID
+            result = db_cursor.execute(f'SELECT short_name FROM {table_name} WHERE user_id=?', (hex_user_id,)).fetchone()
 
             if result:
                 return result[0]
@@ -145,7 +142,34 @@ def get_name_by_id(type, user_id):
                 return f"Unknown User ({hex_user_id})"
     
     except sqlite3.Error as e:
-        print(f"SQLite error in get_name_by_id: {e}")
+        print(f"SQLite error in get_short_name_by_id: {e}")
+    
+    finally:
+        db_connection.close()
+
+def get_long_name_by_id(user_id):
+    try:
+        table_name = sanitize_string(mqtt_broker) + "_" + sanitize_string(root_topic) + sanitize_string(channel) + "_nodeinfo"
+        with sqlite3.connect(db_file_path) as db_connection:
+            db_cursor = db_connection.cursor()
+    
+            # Convert the user_id to hex and prepend '!'
+            hex_user_id = '!' + hex(user_id)[2:]
+
+            # Fetch the long name based on the hex user ID
+            result = db_cursor.execute(f'SELECT long_name FROM {table_name} WHERE user_id=?', (hex_user_id,)).fetchone()
+
+            if result:
+                return result[0]
+            # If we don't find a user id in the db, ask for an id
+            else:
+                if user_id != broadcast_id:
+                    if debug: print("didn't find user in db")
+                    send_node_info(user_id)  # DM unknown user a nodeinfo with want_response
+                return f"Unknown User ({hex_user_id})"
+    
+    except sqlite3.Error as e:
+        print(f"SQLite error in get_long_name_by_id: {e}")
 
     finally:
         db_connection.close()
@@ -353,24 +377,27 @@ def on_message(client, userdata, msg):
             # TODO
 
     elif mp.decoded.portnum == portnums_pb2.TRACEROUTE_APP:
-        if mp.decoded.payload:
-            routeDiscovery = mesh_pb2.RouteDiscovery()
-            routeDiscovery.ParseFromString(mp.decoded.payload)
- 
-            asDict = google.protobuf.json_format.MessageToDict(routeDiscovery)    
+        routeDiscovery = mesh_pb2.RouteDiscovery()
+        routeDiscovery.ParseFromString(mp.decoded.payload)
 
-            if debug: print("Route traced:")
-            routeStr = get_name_by_id("long", getattr(mp, 'to'))
-            if "route" in asDict:
-                for nodeNum in asDict["route"]:
-                     routeStr += " --> " + get_name_by_id("long", nodeNum)
-            routeStr += " --> " + get_name_by_id("long", getattr(mp, 'from'))
-            update_gui(routeStr, tag="info")
+        asDict = google.protobuf.json_format.MessageToDict(routeDiscovery)
+                
+        if debug: print("Route traced:")
+        
+        routeStr = get_long_name_by_id(getattr(mp, 'to'))
+            
+        if "route" in asDict:
+            for nodeNum in asDict["route"]:
+                routeStr += " --> " + get_short_name_by_id(nodeNum)
+        routeStr += " --> " + get_short_name_by_id(getattr(mp, 'from'))
+        update_gui(routeStr, tag="info")
 
+
+        
         if print_telemetry: 
 
-            device_metrics_string = "From: " + get_name_by_id("short", getattr(mp, "from")) + ", "
-            environment_metrics_string = "From: " + get_name_by_id("short", getattr(mp, "from")) + ", "
+            device_metrics_string = "From: " + get_short_name_by_id(getattr(mp, "from")) + ", "
+            environment_metrics_string = "From: " + get_short_name_by_id(getattr(mp, "from")) + ", "
 
             # Only use metrics that are non-zero
             has_device_metrics = True
@@ -430,15 +457,22 @@ def process_message(mp, text_payload, is_encrypted):
     if not message_exists(mp):
         from_node = getattr(mp, "from")
         to_node = getattr(mp, "to")
-        sender_short_name = get_name_by_id("short", from_node)
-        receiver_short_name = get_name_by_id("short", to_node)
+
+        # Needed for ACK
+        message_id = getattr(mp, "id")
+        want_ack = getattr(mp, "want_ack")
+        
+        sender_short_name = get_short_name_by_id(from_node)
+        receiver_short_name = get_short_name_by_id(to_node)
         string = ""
         private_dm = False
 
         if to_node == node_number:
             string = f"{current_time()} DM from {sender_short_name}: {text_payload}"
             if display_dm_emoji: string = string[:9] + dm_emoji + string[9:]
-
+            if want_ack == True:
+                send_ack(from_node, message_id)
+                
         elif from_node == node_number and to_node != broadcast_id:
             string = f"{current_time()} DM to {receiver_short_name}: {text_payload}"
             
@@ -670,39 +704,16 @@ def encrypt_message(channel, key, mesh_packet, encoded_message):
     return encrypted_bytes
 
 
-def send_ack():
-    ## TODO
-    """
-    meshtastic_MeshPacket *p = router->allocForSending();
-    p->decoded.portnum = meshtastic_PortNum_ROUTING_APP;
-    p->decoded.payload.size =
-        pb_encode_to_bytes(p->decoded.payload.bytes, sizeof(p->decoded.payload.bytes), &meshtastic_Routing_msg, &c);
+def send_ack(destination_id, message_id):
+    if debug: print("Sending ACK packet")
 
-    p->priority = meshtastic_MeshPacket_Priority_ACK;
+    encoded_message = mesh_pb2.Data()
+    encoded_message.portnum = portnums_pb2.ROUTING_APP
+    encoded_message.request_id = message_id
+    encoded_message.payload = b"\030\000"
 
-    p->hop_limit = config.lora.hop_limit; // Flood ACK back to original sender
-    p->to = to;
-    p->decoded.request_id = idFrom;
-    p->channel = chIndex;
+    generate_mesh_packet(destination_id, encoded_message)
     
-    /* Ack/naks are sent with very high priority to ensure that retransmission
-    stops as soon as possible */
-    meshtastic_MeshPacket_Priority_ACK = 120,
-
-    /* This packet is being sent as a reliable message, we would prefer it to arrive at the destination.
-    We would like to receive a ack packet in response.
-    Broadcasts messages treat this flag specially: Since acks for broadcasts would
-    rapidly flood the channel, the normal ack behavior is suppressed.
-    Instead, the original sender listens to see if at least one node is rebroadcasting this packet (because naive flooding algorithm).
-    If it hears that the odds (given typical LoRa topologies) the odds are very high that every node should eventually receive the message.
-    So FloodingRouter.cpp generates an implicit ack which is delivered to the original sender.
-    If after some time we don't hear anyone rebroadcast our packet, we will timeout and retransmit, using the regular resend logic.
-    Note: This flag is normally sent in a flag bit in the header when sent over the wire */
-    bool want_ack;
-
-    """
-
-
 #################################
 # Database Handling
         
@@ -794,7 +805,7 @@ def maybe_store_position_in_db(node_id, position):
     if position.latitude_i != 0 and position.longitude_i != 0:
 
         if print_position_report:
-            print("From: " + get_name_by_id("short", node_id) +
+            print("From: " + get_short_name_by_id(node_id) +
                 ", lat: " + str(position.latitude_i) +
                 ", lon: " + str(position.longitude_i) +
                 ", alt: " + str(position.altitude) +
@@ -832,7 +843,7 @@ def maybe_store_position_in_db(node_id, position):
                     db_cursor.execute(f'''
                         INSERT INTO {table_name} (node_id, short_name, timestamp, latitude, longitude)
                         VALUES (?, ?, ?, ?, ?)
-                    ''', (node_id, get_name_by_id("short", node_id), timestamp, latitude, longitude))
+                    ''', (node_id, get_short_name_by_id(node_id), timestamp, latitude, longitude))
                     db_connection.commit()
                     return
 
@@ -841,7 +852,7 @@ def maybe_store_position_in_db(node_id, position):
                         UPDATE {table_name}
                         SET short_name=?, timestamp=?, latitude=?, longitude=?
                         WHERE node_id=?
-                    ''', (get_name_by_id("short", node_id), timestamp, latitude, longitude, node_id))
+                    ''', (get_short_name_by_id(node_id), timestamp, latitude, longitude, node_id))
                     db_connection.commit()
                 else:
                     if debug:
