@@ -77,8 +77,7 @@ client_long_name = "MQTTastic"
 lat = ""
 lon = ""
 alt = ""
-# client_hw_model = 255
-client_hw_model = "PRIVATE_HW"
+client_hw_model = 255
 node_info_interval_minutes = 15
 
 #################################
@@ -582,16 +581,11 @@ def send_node_info(destination_id, want_response):
             if debug: print(f"Sending NodeInfo Packet to {str(destination_id)}")
 
         node_number = int(node_number_entry.get())
-        print(node_number)
         
         decoded_client_id = bytes(node_name, "utf-8")
-        print(decoded_client_id)
         decoded_client_long = bytes(long_name_entry.get(), "utf-8")
-        print(decoded_client_long)
         decoded_client_short = bytes(short_name_entry.get(), "utf-8")
-        print(decoded_client_short)
         decoded_client_hw_model = client_hw_model
-        print(decoded_client_hw_model)
 
         user_payload = mesh_pb2.User()
         setattr(user_payload, "id", decoded_client_id)
