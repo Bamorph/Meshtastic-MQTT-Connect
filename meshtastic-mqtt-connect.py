@@ -800,8 +800,6 @@ def maybe_store_nodeinfo_in_db(info):
 
 
 def maybe_store_position_in_db(node_id, position):
-
-
     # Must have at least a lat/lon
     if position.latitude_i != 0 and position.longitude_i != 0:
 
