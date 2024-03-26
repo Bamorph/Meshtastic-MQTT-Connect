@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Meshtastic MQTT Connect Version 0.7.2 by https://github.com/pdxlocations
+Meshtastic MQTT Connect Version 0.7.6 by https://github.com/pdxlocations
 
 Many thanks to and protos code from: https://github.com/arankwende/meshtastic-mqtt-client & https://github.com/joshpirihi/meshtastic-mqtt
 Encryption/Decryption help from: https://github.com/dstewartgo
@@ -55,7 +55,7 @@ mqtt_broker = "mqtt.meshtastic.org"
 mqtt_port = 1883
 mqtt_username = "meshdev"
 mqtt_password = "large4cats"
-root_topic = "msh/US/2/c/"
+root_topic = "msh/US/2/e/"
 channel = "LongFast"
 key = "AQ=="
 
@@ -67,6 +67,8 @@ dm_emoji = "\u2192"
 random_hex_chars = ''.join(random.choices('0123456789abcdef', k=4))
 node_name = '!abcd' + random_hex_chars
 
+global_message_id = random.getrandbits(32)
+
 # Convert hex to int and remove '!'
 node_number = int(node_name.replace("!", ""), 16)
 
@@ -75,7 +77,8 @@ client_long_name = "MQTTastic"
 lat = ""
 lon = ""
 alt = ""
-client_hw_model = 255
+# client_hw_model = 255
+client_hw_model = "PRIVATE_HW"
 node_info_interval_minutes = 15
 
 #################################
@@ -101,10 +104,26 @@ def set_topic():
     publish_topic = root_topic + channel + "/" + node_name
 
 def current_time():
-    current_time_seconds = time.time()
-    current_time_struct = time.localtime(current_time_seconds)
-    current_time_str = time.strftime("%H:%M:%S", current_time_struct)
+    current_time_str = str(int(time.time()))
     return(current_time_str)
+
+def format_time(time_str):
+    # Convert the time string back to a datetime object
+    timestamp = int(time_str)
+    time_dt = datetime.fromtimestamp(timestamp)
+
+    # Get the current datetime for comparison
+    now = datetime.now()
+
+    # Check if the provided time is from today
+    if time_dt.date() == now.date():
+        # If it's today, format as "H:M am/pm"
+        time_formatted = time_dt.strftime("%I:%M %p")
+    else:
+        # If it's not today, format as "DD/MM/YY H:M:S"
+        time_formatted = time_dt.strftime("%d/%m/%y %H:%M:%S")
+    
+    return time_formatted
 
 def xor_hash(data):
     result = 0
@@ -120,7 +139,7 @@ def generate_hash(name, key):
     result = h_name ^ h_key
     return result
 
-def get_short_name_by_id(user_id):
+def get_name_by_id(type, user_id):
     try:
         table_name = sanitize_string(mqtt_broker) + "_" + sanitize_string(root_topic) + sanitize_string(channel) + "_nodeinfo"
         with sqlite3.connect(db_file_path) as db_connection:
@@ -129,8 +148,11 @@ def get_short_name_by_id(user_id):
             # Convert the user_id to hex and prepend '!'
             hex_user_id = '!' + hex(user_id)[2:]
 
-            # Fetch the short name based on the hex user ID
-            result = db_cursor.execute(f'SELECT short_name FROM {table_name} WHERE user_id=?', (hex_user_id,)).fetchone()
+            # Fetch the name based on the hex user ID
+            if type == "long":
+                result = db_cursor.execute(f'SELECT long_name FROM {table_name} WHERE user_id=?', (hex_user_id,)).fetchone()
+            if type == "short":
+                result = db_cursor.execute(f'SELECT short_name FROM {table_name} WHERE user_id=?', (hex_user_id,)).fetchone()
 
             if result:
                 return result[0]
@@ -138,12 +160,12 @@ def get_short_name_by_id(user_id):
             else:
                 if user_id != broadcast_id:
                     if debug: print("didn't find user in db")
-                    send_node_info(user_id)  # DM unknown user a nodeinfo with want_response
+                    send_node_info(user_id, want_response=True)  # DM unknown user a nodeinfo with want_response
                 return f"Unknown User ({hex_user_id})"
     
     except sqlite3.Error as e:
-        print(f"SQLite error in get_short_name_by_id: {e}")
-    
+        print(f"SQLite error in get_name_by_id: {e}")
+
     finally:
         db_connection.close()
 
@@ -348,28 +370,11 @@ def on_message(client, userdata, msg):
             # TODO
         # Air Quality Metrics
             # TODO
-
-    elif mp.decoded.portnum == portnums_pb2.TRACEROUTE_APP:
-        routeDiscovery = mesh_pb2.RouteDiscovery()
-        routeDiscovery.ParseFromString(mp.decoded.payload)
-
-        asDict = google.protobuf.json_format.MessageToDict(routeDiscovery)
-                
-        print("Route traced:")
-        
-        routeStr = f"!{hex(getattr(mp, 'to'))[2:]}"
-            
-        if "route" in asDict:
-            for nodeNum in asDict["route"]:
-                routeStr += " --> " + get_short_name_by_id(nodeNum)
-                routeStr += " --> " + get_short_name_by_id(getattr(mp, 'from'))
-                update_gui(routeStr, tag="info")
-
         
         if print_telemetry: 
 
-            device_metrics_string = "From: " + get_short_name_by_id(getattr(mp, "from")) + ", "
-            environment_metrics_string = "From: " + get_short_name_by_id(getattr(mp, "from")) + ", "
+            device_metrics_string = "From: " + get_name_by_id("short", getattr(mp, "from")) + ", "
+            environment_metrics_string = "From: " + get_name_by_id("short", getattr(mp, "from")) + ", "
 
             # Only use metrics that are non-zero
             has_device_metrics = True
@@ -395,6 +400,22 @@ def on_message(client, userdata, msg):
                 print(device_metrics_string)
             if has_environment_metrics:
                 print(environment_metrics_string)
+
+
+    elif mp.decoded.portnum == portnums_pb2.TRACEROUTE_APP:
+        if mp.decoded.payload:
+            routeDiscovery = mesh_pb2.RouteDiscovery()
+            routeDiscovery.ParseFromString(mp.decoded.payload)
+ 
+            asDict = google.protobuf.json_format.MessageToDict(routeDiscovery)    
+
+            if debug: print("Route traced:")
+            route_string = get_name_by_id("long", getattr(mp, 'to'))
+
+            for nodeNum in asDict["route"]:
+                    route_string += " --> " + get_name_by_id("long", nodeNum)
+            route_string += " --> " + get_name_by_id("long", getattr(mp, 'from'))
+            update_gui(route_string, tag="info")
 
 
 def decode_encrypted(mp):
@@ -429,28 +450,35 @@ def process_message(mp, text_payload, is_encrypted):
     if not message_exists(mp):
         from_node = getattr(mp, "from")
         to_node = getattr(mp, "to")
-        sender_short_name = get_short_name_by_id(from_node)
-        receiver_short_name = get_short_name_by_id(to_node)
+
+        # Needed for ACK
+        message_id = getattr(mp, "id")
+        want_ack = getattr(mp, "want_ack")
+        
+        sender_short_name = get_name_by_id("short", from_node)
+        receiver_short_name = get_name_by_id("short", to_node)
         string = ""
         private_dm = False
 
         if to_node == node_number:
-            string = f"{current_time()} DM from {sender_short_name}: {text_payload}"
+            string = f"{format_time(current_time())} DM from {sender_short_name}: {text_payload}"
             if display_dm_emoji: string = string[:9] + dm_emoji + string[9:]
+            if want_ack == True:
+                send_ack(from_node, message_id)
 
         elif from_node == node_number and to_node != broadcast_id:
-            string = f"{current_time()} DM to {receiver_short_name}: {text_payload}"
+            string = f"{format_time(current_time())} DM to {receiver_short_name}: {text_payload}"
             
         elif from_node != node_number and to_node != broadcast_id:
             if display_private_dms:
-                string = f"{current_time()} DM from {sender_short_name} to {receiver_short_name}: {text_payload}"
+                string = f"{format_time(current_time())} DM from {sender_short_name} to {receiver_short_name}: {text_payload}"
                 if display_dm_emoji: string = string[:9] + dm_emoji + string[9:]
             else:
                 if debug: print("Private DM Ignored")
                 private_dm = True
             
         else:    
-            string = f"{current_time()} {sender_short_name}: {text_payload}"
+            string = f"{format_time(current_time())} {sender_short_name}: {text_payload}"
 
         if is_encrypted and not private_dm:
             color="encrypted"
@@ -523,10 +551,10 @@ def send_traceroute(destination_id):
     if debug: print("send_TraceRoute")
 
     if not client.is_connected():
-        message =  current_time() + " >>> Connect to a broker before sending traceroute"
+        message =  format_time(current_time()) + " >>> Connect to a broker before sending traceroute"
         update_gui(message, tag="info")
     else:
-        message =  current_time() + " >>> Sending Traceroute Packet"
+        message =  format_time(current_time()) + " >>> Sending Traceroute Packet"
         update_gui(message, tag="info")
 
         if debug: print(f"Sending Traceroute Packet to {str(destination_id)}")
@@ -538,27 +566,33 @@ def send_traceroute(destination_id):
         destination_id = int(destination_id[1:], 16)
         generate_mesh_packet(destination_id, encoded_message)
 
-def send_node_info(destination_id):
+def send_node_info(destination_id, want_response):
 
     global client_short_name, client_long_name, node_name, node_number, client_hw_model, broadcast_id
     if debug: print("send_node_info")
 
     if not client.is_connected():
-        message =  current_time() + " >>> Connect to a broker before sending nodeinfo"
+        message =  format_time(current_time()) + " >>> Connect to a broker before sending nodeinfo"
         update_gui(message, tag="info")
     else:
         if destination_id == broadcast_id:
-            message =  current_time() + " >>> Broadcast NodeInfo Packet"
+            message =  format_time(current_time()) + " >>> Broadcast NodeInfo Packet"
             update_gui(message, tag="info")
         else:
             if debug: print(f"Sending NodeInfo Packet to {str(destination_id)}")
 
         node_number = int(node_number_entry.get())
-
+        print(node_number)
+        
         decoded_client_id = bytes(node_name, "utf-8")
+        print(decoded_client_id)
         decoded_client_long = bytes(long_name_entry.get(), "utf-8")
+        print(decoded_client_long)
         decoded_client_short = bytes(short_name_entry.get(), "utf-8")
+        print(decoded_client_short)
         decoded_client_hw_model = client_hw_model
+        print(decoded_client_hw_model)
+
         user_payload = mesh_pb2.User()
         setattr(user_payload, "id", decoded_client_id)
         setattr(user_payload, "long_name", decoded_client_long)
@@ -570,8 +604,9 @@ def send_node_info(destination_id):
         encoded_message = mesh_pb2.Data()
         encoded_message.portnum = portnums_pb2.NODEINFO_APP
         encoded_message.payload = user_payload
-        encoded_message.want_response = True  # Request NodeInfo back
+        encoded_message.want_response = want_response  # Request NodeInfo back
 
+        # print(encoded_message)
         generate_mesh_packet(destination_id, encoded_message)
 
 
@@ -581,11 +616,11 @@ def send_position(destination_id):
     if debug: print("send_Position")
 
     if not client.is_connected():
-        message =  current_time() + " >>> Connect to a broker before sending position"
+        message =  format_time(current_time()) + " >>> Connect to a broker before sending position"
         update_gui(message, tag="info")
     else:
         if destination_id == broadcast_id:
-            message =  current_time() + " >>> Broadcast Position Packet"
+            message =  format_time(current_time()) + " >>> Broadcast Position Packet"
             update_gui(message, tag="info")
         else:
             if debug: print(f"Sending Position Packet to {str(destination_id)}")
@@ -616,21 +651,26 @@ def send_position(destination_id):
         encoded_message = mesh_pb2.Data()
         encoded_message.portnum = portnums_pb2.POSITION_APP
         encoded_message.payload = position_payload
-        encoded_message.want_response = False
+        encoded_message.want_response = True
 
         generate_mesh_packet(destination_id, encoded_message)
 
 
 
 def generate_mesh_packet(destination_id, encoded_message):
+    global global_message_id
     mesh_packet = mesh_pb2.MeshPacket()
 
+    # Use the global message ID and increment it for the next call
+    mesh_packet.id = global_message_id
+    global_message_id += 1
+    
     setattr(mesh_packet, "from", node_number)
-    mesh_packet.id = random.getrandbits(32)
     mesh_packet.to = destination_id
     mesh_packet.want_ack = False
     mesh_packet.channel = generate_hash(channel, key)
     mesh_packet.hop_limit = 3
+
 
     if key == "":
         mesh_packet.decoded.CopyFrom(encoded_message)
@@ -643,10 +683,11 @@ def generate_mesh_packet(destination_id, encoded_message):
     service_envelope.packet.CopyFrom(mesh_packet)
     service_envelope.channel_id = channel
     service_envelope.gateway_id = node_name
-    # print (service_envelope)
+    print (service_envelope)
 
     payload = service_envelope.SerializeToString()
     set_topic()
+    # print(payload)
     client.publish(publish_topic, payload)
 
 
@@ -669,37 +710,15 @@ def encrypt_message(channel, key, mesh_packet, encoded_message):
     return encrypted_bytes
 
 
-def send_ack():
-    ## TODO
-    """
-    meshtastic_MeshPacket *p = router->allocForSending();
-    p->decoded.portnum = meshtastic_PortNum_ROUTING_APP;
-    p->decoded.payload.size =
-        pb_encode_to_bytes(p->decoded.payload.bytes, sizeof(p->decoded.payload.bytes), &meshtastic_Routing_msg, &c);
+def send_ack(destination_id, message_id):
+    if debug: print("Sending ACK")
 
-    p->priority = meshtastic_MeshPacket_Priority_ACK;
+    encoded_message = mesh_pb2.Data()
+    encoded_message.portnum = portnums_pb2.ROUTING_APP
+    encoded_message.request_id = message_id
+    encoded_message.payload = b"\030\000"
 
-    p->hop_limit = config.lora.hop_limit; // Flood ACK back to original sender
-    p->to = to;
-    p->decoded.request_id = idFrom;
-    p->channel = chIndex;
-    
-    /* Ack/naks are sent with very high priority to ensure that retransmission
-    stops as soon as possible */
-    meshtastic_MeshPacket_Priority_ACK = 120,
-
-    /* This packet is being sent as a reliable message, we would prefer it to arrive at the destination.
-    We would like to receive a ack packet in response.
-    Broadcasts messages treat this flag specially: Since acks for broadcasts would
-    rapidly flood the channel, the normal ack behavior is suppressed.
-    Instead, the original sender listens to see if at least one node is rebroadcasting this packet (because naive flooding algorithm).
-    If it hears that the odds (given typical LoRa topologies) the odds are very high that every node should eventually receive the message.
-    So FloodingRouter.cpp generates an implicit ack which is delivered to the original sender.
-    If after some time we don't hear anyone rebroadcast our packet, we will timeout and retransmit, using the regular resend logic.
-    Note: This flag is normally sent in a flag bit in the header when sent over the wire */
-    bool want_ack;
-
-    """
+    generate_mesh_packet(destination_id, encoded_message)
 
 
 #################################
@@ -793,7 +812,7 @@ def maybe_store_position_in_db(node_id, position):
     if position.latitude_i != 0 and position.longitude_i != 0:
 
         if print_position_report:
-            print("From: " + get_short_name_by_id(node_id) +
+            print("From: " + get_name_by_id("short", node_id) +
                 ", lat: " + str(position.latitude_i) +
                 ", lon: " + str(position.longitude_i) +
                 ", alt: " + str(position.altitude) +
@@ -831,7 +850,7 @@ def maybe_store_position_in_db(node_id, position):
                     db_cursor.execute(f'''
                         INSERT INTO {table_name} (node_id, short_name, timestamp, latitude, longitude)
                         VALUES (?, ?, ?, ?, ?)
-                    ''', (node_id, get_short_name_by_id(node_id), timestamp, latitude, longitude))
+                    ''', (node_id, get_name_by_id("short", node_id), timestamp, latitude, longitude))
                     db_connection.commit()
                     return
 
@@ -840,7 +859,7 @@ def maybe_store_position_in_db(node_id, position):
                         UPDATE {table_name}
                         SET short_name=?, timestamp=?, latitude=?, longitude=?
                         WHERE node_id=?
-                    ''', (get_short_name_by_id(node_id), timestamp, latitude, longitude, node_id))
+                    ''', (get_name_by_id("short", node_id), timestamp, latitude, longitude, node_id))
                     db_connection.commit()
                 else:
                     if debug:
@@ -894,10 +913,11 @@ def load_message_history_from_db():
 
             # Display each message in the message_history widget
             for message in messages:
+                timestamp = format_time(message[0])
                 if message[3] == 1:
-                    the_message = f"{message[0]} {encrypted_emoji}{message[1]}: {message[2]}\n"
+                    the_message = f"{timestamp} {encrypted_emoji}{message[1]}: {message[2]}\n"
                 else:
-                    the_message = f"{message[0]} {message[1]}: {message[2]}\n"
+                    the_message = f"{timestamp} {message[1]}: {message[2]}\n"
                 message_history.insert(tk.END, the_message)
 
             message_history.config(state=tk.DISABLED)
@@ -936,9 +956,9 @@ def erase_nodedb():
             nodeinfo_window.config(state=tk.NORMAL)
             nodeinfo_window.delete('1.0', tk.END)
             nodeinfo_window.config(state=tk.DISABLED)
-            update_gui(f"{current_time()} >>> Node database for channel {channel} erased successfully.", tag="info")
+            update_gui(f"{format_time(current_time())} >>> Node database for channel {channel} erased successfully.", tag="info")
     else:
-        update_gui(f"{current_time()} >>> Node database erase for channel {channel} cancelled.", tag="info")
+        update_gui(f"{format_time(current_time())} >>> Node database erase for channel {channel} cancelled.", tag="info")
 
 
 
@@ -969,9 +989,9 @@ def erase_messagedb():
             message_history.config(state=tk.NORMAL)
             message_history.delete('1.0', tk.END)
             message_history.config(state=tk.DISABLED)
-            update_gui(f"{current_time()} >>> Message history for channel {channel} erased successfully.", tag="info")
+            update_gui(f"{format_time(current_time())} >>> Message history for channel {channel} erased successfully.", tag="info")
     else:
-        update_gui(f"{current_time()} >>> Message history erase for channel {channel} cancelled.", tag="info")
+        update_gui(f"{format_time(current_time())} >>> Message history erase for channel {channel} cancelled.", tag="info")
 
 
 #################################
@@ -1010,24 +1030,24 @@ def connect_mqtt():
 
             client.username_pw_set(mqtt_username, mqtt_password)
             client.connect(mqtt_broker, mqtt_port, 60)
-            update_gui(f"{current_time()} >>> Connecting to MQTT broker at {mqtt_broker}...", tag="info")
+            update_gui(f"{format_time(current_time())} >>> Connecting to MQTT broker at {mqtt_broker}...", tag="info")
 
         except Exception as e:
-            update_gui(f"{current_time()} >>> Failed to connect to MQTT broker: {str(e)}", tag="info")
+            update_gui(f"{format_time(current_time())} >>> Failed to connect to MQTT broker: {str(e)}", tag="info")
 
         update_node_list()
     elif client.is_connected() and channel_entry.get() is not channel:
         print ("Channel has changed, disconnect and reconnect")
 
     else:
-        update_gui(f"{current_time()} >>> Already connected to {mqtt_broker}", tag="info")
+        update_gui(f"{format_time(current_time())} >>> Already connected to {mqtt_broker}", tag="info")
 
 
 def disconnect_mqtt():
     if debug: print("disconnect_mqtt")
     if client.is_connected():
         client.disconnect()
-        update_gui(f"{current_time()} >>> Disconnected from MQTT broker", tag="info")
+        update_gui(f"{format_time(current_time())} >>> Disconnected from MQTT broker", tag="info")
         # Clear the display
         nodeinfo_window.config(state=tk.NORMAL)
         nodeinfo_window.delete('1.0', tk.END)
@@ -1049,22 +1069,22 @@ def on_connect(client, userdata, flags, reason_code, properties):
         load_message_history_from_db()
         if debug: print(f"Subscribe Topic is: {subscribe_topic}")
         client.subscribe(subscribe_topic)
-        message = f"{current_time()} >>> Connected to {mqtt_broker} on topic {channel} as {'!' + hex(node_number)[2:]}"
+        message = f"{format_time(current_time())} >>> Connected to {mqtt_broker} on topic {channel} as {'!' + hex(node_number)[2:]}"
         update_gui(message, tag="info")
-        send_node_info(broadcast_id)
+        send_node_info(broadcast_id, want_response=False)
 
         if lon_entry.get() and lon_entry.get():
             send_position(broadcast_id)
 
     else:
-        message = f"{current_time()} >>> Failed to connect to MQTT broker with result code {str(reason_code)}"
+        message = f"{format_time(current_time())} >>> Failed to connect to MQTT broker with result code {str(reason_code)}"
         update_gui(message, tag="info")
     
 
 def on_disconnect(client, userdata, flags, reason_code, properties):
     if debug: print("on_disconnect")
     if reason_code != 0:
-        message = f"{current_time()} >>> Disconnected from MQTT broker with result code {str(reason_code)}"
+        message = f"{format_time(current_time())} >>> Disconnected from MQTT broker with result code {str(reason_code)}"
         update_gui(message, tag="info")
 
 
@@ -1332,7 +1352,7 @@ connect_button.grid(row=2, column=2, padx=5, pady=1, sticky=tk.EW)
 disconnect_button = tk.Button(button_frame, text="Disconnect", command=disconnect_mqtt)
 disconnect_button.grid(row=3, column=2, padx=5, pady=1, sticky=tk.EW)
 
-node_info_button = tk.Button(button_frame, text="Send NodeInfo", command=lambda: send_node_info(broadcast_id))
+node_info_button = tk.Button(button_frame, text="Send NodeInfo", command=lambda: send_node_info(broadcast_id, want_response=True))
 node_info_button.grid(row=4, column=2, padx=5, pady=1, sticky=tk.EW)
 
 erase_nodedb_button = tk.Button(button_frame, text="Erase NodeDB", command=erase_nodedb)
@@ -1370,13 +1390,13 @@ entry_dm = tk.Entry(message_log_frame)
 entry_dm.grid(row=14, column=2, padx=5, pady=1, sticky=tk.EW)
 
 broadcast_button = tk.Button(message_log_frame, text="Broadcast Message", command=lambda: publish_message(broadcast_id))
-broadcast_button.grid(row=15, column=0, padx=5, pady=15, sticky=tk.EW)
+broadcast_button.grid(row=15, column=0, padx=5, pady=1, sticky=tk.EW)
 
 dm_button = tk.Button(message_log_frame, text="Direct Message", command=lambda: direct_message(entry_dm.get()))
-dm_button.grid(row=15, column=2, padx=5, pady=15, sticky=tk.EW)
+dm_button.grid(row=15, column=2, padx=5, pady=1, sticky=tk.EW)
 
 tr_button = tk.Button(message_log_frame, text="Trace Route", command=lambda: send_traceroute(entry_dm.get()))
-tr_button.grid(row=16, column=2, padx=5, pady=15, sticky=tk.EW)
+tr_button.grid(row=16, column=2, padx=5, pady=(1,5), sticky=tk.EW)
 
 
 ### NODE LIST
@@ -1414,7 +1434,7 @@ mqtt_thread.start()
 def send_node_info_periodically():
     while True:
         if client.is_connected():
-            send_node_info(broadcast_id)
+            send_node_info(broadcast_id, want_response=False)
 
             if lon_entry.get() and lon_entry.get():
                 send_position(broadcast_id)
